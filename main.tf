@@ -13,6 +13,11 @@ locals {
 }
 
 /**
+ * Look up the current account.
+ */
+data aws_caller_identity self {}
+
+/**
  * Create a new KMS Key used for encrypting the Remote State bucket.
  */
 resource aws_kms_key key {
@@ -57,8 +62,8 @@ resource aws_s3_bucket state {
   }
 
   server_side_encryption_configuration {
-    rule = {
-      apply_server_side_encryption_by_default = {
+    rule {
+      apply_server_side_encryption_by_default {
         kms_master_key_id = aws_kms_key.key.key_id
         sse_algorithm     = "aws:kms"
       }
@@ -110,7 +115,7 @@ resource aws_dynamodb_table table {
 resource aws_iam_role role {
   path = "/terraform-remote-state/"
 
-  name = "tf-state-management"
+  name        = "tf-state-management"
   description = "Terraform Remote State Management"
 
   assume_role_policy = jsonencode({
@@ -120,7 +125,7 @@ resource aws_iam_role role {
         Sid    = "AllowedPrincipals",
         Action = "sts:AssumeRole",
         Principal = {
-          AWS = var.assume_role_principals
+          AWS = length(var.assume_role_principals) == 0 ? ["arn:aws:iam::${data.aws_caller_identity.self.account_id}:root"] : var.assume_role_principals
         },
         Effect = "Allow"
       }
@@ -134,26 +139,25 @@ resource aws_iam_role role {
 resource aws_iam_role_policy policy {
   role = aws_iam_role.role.id
 
-  name        = "tf-state-management-policy"
-  description = "Terraform Remote State Management"
+  name = "tf-state-management-policy"
 
   policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
       {
-        Sid      = "S3GetObject",
-        Effect   = "Allow",
-        Action   = [
+        Sid    = "S3ReadWrite",
+        Effect = "Allow",
+        Action = [
           "s3:GetObject",
           "s3:PutObject"
         ],
-        Resource = "arn:aws:s3:::${aws_s3_bucket.state.bucket}/*"
+        Resource = "${aws_s3_bucket.state.arn}/*"
       },
       {
         Sid      = "S3ListBucket",
         Effect   = "Allow",
         Action   = "s3:ListBucket",
-        Resource = "arn:aws:s3:::${aws_s3_bucket.state.bucket}"
+        Resource = aws_s3_bucket.state.arn
       },
       {
         Sid      = "KMSListKeys",
@@ -172,8 +176,8 @@ resource aws_iam_role_policy policy {
         Resource = aws_kms_key.key.arn
       },
       {
-        Sid      = "S3GetObject",
-        Effect   = "Allow",
+        Sid    = "DynamoDBAccess",
+        Effect = "Allow",
         Action = [
           "dynamodb:DescribeTable",
           "dynamodb:DeleteItem",
