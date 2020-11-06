@@ -10,6 +10,54 @@ locals {
   tags = merge(var.tags, {
     ManagedBy = "terraform"
   })
+
+  iam_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "S3Access",
+        Effect = "Allow",
+        Action = ["s3:*"],
+        Resource = [
+          "arn:aws:s3:::${aws_s3_bucket.state.bucket}/*"
+        ]
+      },
+      {
+        Sid      = "S3ListBucket",
+        Effect   = "Allow",
+        Action   = "s3:*",
+        Resource = "arn:aws:s3:::${aws_s3_bucket.state.bucket}"
+      },
+      {
+        Sid      = "KMSListKeys",
+        Effect   = "Allow",
+        Action   = "kms:ListKeys",
+        Resource = "*"
+      },
+      {
+        Sid    = "KMSRead",
+        Effect = "Allow",
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ],
+        Resource = aws_kms_key.key.arn
+      },
+      {
+        Sid    = "DynamoDBAccess",
+        Effect = "Allow",
+        Action = [
+          "dynamodb:DescribeTable",
+          "dynamodb:DeleteItem",
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ],
+        Resource = aws_dynamodb_table.table.arn
+      }
+    ]
+  })
 }
 
 /**
@@ -42,7 +90,6 @@ resource aws_kms_alias alias {
  */
 resource aws_s3_bucket logging {
   bucket = "${var.prefix}-tf-state-logs"
-  region = var.region
   acl    = "log-delivery-write"
 }
 
@@ -51,7 +98,6 @@ resource aws_s3_bucket logging {
  */
 resource aws_s3_bucket state {
   bucket = local.state_name
-  region = var.region
   acl    = "private"
 
   depends_on = [aws_kms_key.key]
@@ -72,11 +118,6 @@ resource aws_s3_bucket state {
 
   versioning {
     enabled = true
-  }
-
-  // Throw an error if we try to delete this resource
-  lifecycle {
-    prevent_destroy = true
   }
 
   tags = local.tags
@@ -101,12 +142,42 @@ resource aws_dynamodb_table table {
     name = "LockID"
   }
 
-  // Throw an error if we try to delete this resource
-  lifecycle {
-    prevent_destroy = true
-  }
-
   tags = local.tags
+}
+
+/**
+ * Optional - Create an IAM User for managing Terraform Remote State.
+ *
+ * While using Roles and delegation through AssumeRole seems ideal, it may be preferred
+ * to create a Single user with credentials that is shared across AWS Account and Terraform Projects.
+ */
+resource aws_iam_user user {
+  count = var.create_user ? 1 : 0
+
+  name = var.user_name
+}
+
+/**
+ * Attach the management policy to the User if it's being created.
+ */
+resource aws_iam_user_policy user_policy {
+  count = var.create_user ? 1 : 0
+
+  name   = "tf-state-management"
+  user   = aws_iam_user.user[0].name
+  policy = local.iam_policy
+}
+
+/**
+ * Optional - Create IAM Credentials for the User.
+ *
+ * It may be preferred to manage the Access Key manually to avoid it being stored in state.
+ */
+resource aws_iam_access_key key {
+  count = var.create_user && var.create_user_credentials ? 1 : 0
+
+  user    = aws_iam_user.user[0].name
+  pgp_key = var.pgp_key == null || var.pgp_key == "" ? null : var.pgp_key
 }
 
 /**
@@ -122,12 +193,21 @@ resource aws_iam_role role {
     Version = "2012-10-17",
     Statement = [
       {
-        Sid    = "AllowedPrincipals",
-        Action = "sts:AssumeRole",
+        Sid    = "AllowEC2",
+        Effect = "Allow",
         Principal = {
-          AWS = length(var.assume_role_principals) == 0 ? ["arn:aws:iam::${data.aws_caller_identity.self.account_id}:root"] : var.assume_role_principals
+          Service = "ec2.amazonaws.com"
         },
+        Action = "sts:AssumeRole"
+      },
+      {
+        Sid    = "AllowPrincipals",
         Effect = "Allow"
+        Principal = {
+          # If no principals were given then allow within the same account
+          AWS = length(var.assume_role_principals) == 0 ? [data.aws_caller_identity.self.account_id] : var.assume_role_principals
+        },
+        Action = "sts:AssumeRole",
       }
     ]
   })
@@ -136,57 +216,10 @@ resource aws_iam_role role {
 /**
  * Create an IAM Policy allows management of the Terraform Remote State.
  */
-resource aws_iam_role_policy policy {
+resource aws_iam_role_policy role_policy {
   role = aws_iam_role.role.id
 
   name = "tf-state-management-policy"
 
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Sid    = "S3ReadWrite",
-        Effect = "Allow",
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject"
-        ],
-        Resource = "${aws_s3_bucket.state.arn}/*"
-      },
-      {
-        Sid      = "S3ListBucket",
-        Effect   = "Allow",
-        Action   = "s3:ListBucket",
-        Resource = aws_s3_bucket.state.arn
-      },
-      {
-        Sid      = "KMSListKeys",
-        Effect   = "Allow",
-        Action   = "kms:ListKeys",
-        Resource = "*"
-      },
-      {
-        Sid    = "KMSRead",
-        Effect = "Allow",
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:DescribeKey"
-        ],
-        Resource = aws_kms_key.key.arn
-      },
-      {
-        Sid    = "DynamoDBAccess",
-        Effect = "Allow",
-        Action = [
-          "dynamodb:DescribeTable",
-          "dynamodb:DeleteItem",
-          "dynamodb:GetItem",
-          "dynamodb:PutItem",
-          "dynamodb:UpdateItem"
-        ],
-        Resource = aws_dynamodb_table.table.arn
-      }
-    ]
-  })
+  policy = local.iam_policy
 }
