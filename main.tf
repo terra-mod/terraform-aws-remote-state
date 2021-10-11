@@ -1,6 +1,6 @@
 // Requires Terraform 0.12 or higher
 terraform {
-  required_version = "~> 0.12"
+  required_version = ">= 0.12"
 }
 
 locals {
