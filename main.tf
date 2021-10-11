@@ -10,6 +10,8 @@ locals {
   tags = merge(var.tags, {
     ManagedBy = "terraform"
   })
+  
+  principals = distinct(concat([data.aws_caller_identity.self.account_id], tolist(var.assume_role_principals)))
 
   iam_policy = jsonencode({
     Version = "2012-10-17",
@@ -205,7 +207,7 @@ resource aws_iam_role role {
         Effect = "Allow"
         Principal = {
           # If no principals were given then allow within the same account
-          AWS = length(var.assume_role_principals) == 0 ? [data.aws_caller_identity.self.account_id] : var.assume_role_principals
+          AWS = local.principals
         },
         Action = "sts:AssumeRole",
       }
